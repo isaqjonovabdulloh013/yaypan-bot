@@ -8,7 +8,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 
-TOKEN = "8941827736:AAG-_904o4TfiKwPBWT5l-X3A18qO-3s6xc"
+TOKEN = "8941827736:AAFBeYE_MJ6HlVXJHGoVFeRslYWY2XzggYo"
 ADMIN_ID = 8488328091
 
 logging.basicConfig(level=logging.INFO)
