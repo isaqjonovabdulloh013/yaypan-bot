@@ -3,6 +3,8 @@ import asyncio
 import os
 import json
 import html
+import re
+from datetime import datetime
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -12,7 +14,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     InlineKeyboardButton, InlineKeyboardMarkup,
     ReplyKeyboardMarkup, KeyboardButton,
-    WebAppInfo, BotCommand, MenuButtonCommands,
+    WebAppInfo, BotCommand, MenuButtonCommands, BufferedInputFile,
 )
 
 # Tokenni Render'da "BOT_TOKEN" environment variable sifatida qo'yish tavsiya etiladi
@@ -123,6 +125,97 @@ def info_text(name, location, phone):
         f"📍 <b>Manzil:</b> {html.escape(str(location))}\n"
         f"📞 <b>Telefon:</b> {html.escape(str(phone))}"
     )
+
+
+# ---------- Admin tugmalari va chek (print) ----------
+def admin_order_keyboard(user_id):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🚚 Yetkazilmoqda", callback_data=f"deliv_{user_id}")],
+        [InlineKeyboardButton(text="🖨 Print qilish", callback_data="print_order")],
+    ])
+
+
+def fmt_money(n):
+    return f"{int(n):,}".replace(",", " ")
+
+
+def parse_order_text(text):
+    """Admin xabaridan ism, telefon, mahsulotlar va jami summani ajratib oladi."""
+    name = re.search(r"Ism:\s*(.+)", text)
+    phone = re.search(r"Telefon:\s*(.+)", text)
+    total = re.search(r"Umumiy summa:\s*([\d\s]+)", text)
+    items = []
+    for m in re.finditer(r"•\s*(.+?):\s*(\d+)\s*ta\s*[×x]\s*(\d+)\s*=\s*(\d+)", text):
+        title = re.sub(r"^\d+\.\s*", "", m.group(1).strip())  # "21. Banan" -> "Banan"
+        items.append((title, int(m.group(2)), int(m.group(3)), int(m.group(4))))
+    return {
+        "name": name.group(1).strip() if name else "-",
+        "phone": phone.group(1).strip() if phone else "-",
+        "items": items,
+        "total": int(re.sub(r"\s", "", total.group(1))) if total and total.group(1).strip() else sum(i[3] for i in items),
+    }
+
+
+def build_receipt_html(order):
+    rows = ""
+    for title, qty, price, cost in order["items"]:
+        rows += (
+            f"<tr><td class='n'>{html.escape(title)}</td>"
+            f"<td>{qty}</td><td>{fmt_money(price)}</td><td class='r'>{fmt_money(cost)}</td></tr>"
+        )
+    now = datetime.now().strftime("%d.%m.%Y %H:%M")
+    return f"""<!DOCTYPE html>
+<html lang="uz"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chek</title>
+<style>
+  @page {{ margin: 6mm; }}
+  body {{ font-family: Arial, sans-serif; font-size: 14px; color: #000; max-width: 380px; margin: 0 auto; padding: 10px; }}
+  h2 {{ text-align: center; margin: 0 0 4px; }}
+  .date {{ text-align: center; font-size: 12px; margin-bottom: 10px; }}
+  .info p {{ margin: 3px 0; font-size: 15px; }}
+  table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
+  th, td {{ border-bottom: 1px dashed #000; padding: 5px 2px; text-align: center; }}
+  th {{ border-bottom: 2px solid #000; font-size: 12px; }}
+  td.n {{ text-align: left; }}
+  td.r, th.r {{ text-align: right; }}
+  .total {{ margin-top: 12px; font-size: 18px; font-weight: bold; text-align: right; border-top: 2px solid #000; padding-top: 8px; }}
+  .btn {{ display: block; margin: 16px auto 0; padding: 10px 24px; font-size: 16px; }}
+  @media print {{ .btn {{ display: none; }} }}
+</style></head>
+<body>
+  <h2>🍦 YAYPAN MUZQAYMOQ</h2>
+  <div class="date">{now}</div>
+  <div class="info">
+    <p><b>Ism:</b> {html.escape(order['name'])}</p>
+    <p><b>Telefon:</b> {html.escape(order['phone'])}</p>
+  </div>
+  <table>
+    <tr><th style="text-align:left">Mahsulot</th><th>Soni</th><th>Narxi</th><th class="r">Summa</th></tr>
+    {rows}
+  </table>
+  <div class="total">JAMI: {fmt_money(order['total'])} so'm</div>
+  <button class="btn" onclick="window.print()">🖨 Print</button>
+  <script>window.onload = function() {{ setTimeout(function() {{ window.print(); }}, 400); }};</script>
+</body></html>"""
+
+
+@dp.callback_query(F.data == "print_order")
+async def print_order(callback_query: types.CallbackQuery):
+    if callback_query.from_user.id != ADMIN_ID:
+        await callback_query.answer("Bu tugma faqat admin uchun!", show_alert=True)
+        return
+    order = parse_order_text(callback_query.message.text or callback_query.message.caption or "")
+    if not order["items"]:
+        await callback_query.answer("Buyurtma tarkibini o'qib bo'lmadi.", show_alert=True)
+        return
+    content = build_receipt_html(order).encode("utf-8")
+    safe_name = re.sub(r"[^\w\-]+", "_", order["name"])[:20] or "buyurtma"
+    await callback_query.message.answer_document(
+        BufferedInputFile(content, filename=f"chek_{safe_name}.html"),
+        caption="🖨 Chek tayyor. Faylni oching — print oynasi o'zi chiqadi."
+    )
+    await callback_query.answer("Chek yuborildi ✅")
 
 
 # ---------- /start ----------
@@ -355,10 +448,7 @@ async def finish_order(message: types.Message, state: FSMContext):
         f"🛍 <b>Buyurtma tarkibi:</b>\n{order_details}\n"
         f"💳 <b>Umumiy summa:</b> {total_price} so'm"
     )
-    admin_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🚚 Yetkazilmoqda", callback_data=f"deliv_{user_id}")]
-    ])
-    await bot.send_message(ADMIN_ID, admin_message, parse_mode="HTML", reply_markup=admin_kb)
+    await bot.send_message(ADMIN_ID, admin_message, parse_mode="HTML", reply_markup=admin_order_keyboard(user_id))
 
     user_carts[user_id] = {}
     await message.answer(
@@ -381,7 +471,8 @@ async def process_delivery_status(callback_query: types.CallbackQuery):
         await callback_query.answer("Xaridorga xabar yuborildi! ✅")
         await callback_query.message.edit_reply_markup(
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="✅ Yetkazilmoqda (Yuborildi)", callback_data="none")]
+                [InlineKeyboardButton(text="✅ Yetkazilmoqda (Yuborildi)", callback_data="none")],
+                [InlineKeyboardButton(text="🖨 Print qilish", callback_data="print_order")],
             ])
         )
     except Exception:
