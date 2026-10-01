@@ -20,7 +20,7 @@ from aiogram.types import (
 )
 
 # Tokenni Render'da "BOT_TOKEN" environment variable sifatida qo'yish tavsiya etiladi
-TOKEN = os.environ.get("BOT_TOKEN", "8941827736:AAHeWdeXVEyPY9TulWXR1Wj6YlS5jorX4Cs")
+TOKEN = os.environ.get("BOT_TOKEN", "8941827736:AAE_9frRYe2r2FKhwcL9QK8eoOcXtmCf34w")
 ADMIN_ID = 8488328091
 WEBAPP_URL = "https://yaypanmuzqamoq.netlify.app"
 USERS_FILE = "users.json"
