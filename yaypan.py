@@ -4,9 +4,11 @@ import os
 import json
 import html
 import re
+import io
 from datetime import datetime
+from PIL import Image, ImageDraw, ImageFont
 from aiohttp import web
-from aiogram import Bot, Dispatcher, types, F
+from aiogram import Bot, Dispatcher, types, F, BaseMiddleware
 from aiogram.filters import Command
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.state import State, StatesGroup
@@ -22,6 +24,8 @@ TOKEN = os.environ.get("BOT_TOKEN", "8941827736:AAEV_hXpWiVFcPNmQoBHcMzL3OHWjHUv
 ADMIN_ID = 8488328091
 WEBAPP_URL = "https://yaypanmuzqamoq.netlify.app"
 USERS_FILE = "users.json"
+CHANNEL = "@YAYPAN_muzqaymoq"                      # majburiy obuna kanali
+CHANNEL_URL = "https://t.me/YAYPAN_muzqaymoq"
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TOKEN)
@@ -156,48 +160,80 @@ def parse_order_text(text):
     }
 
 
-def build_receipt_html(order):
-    rows = ""
-    for title, qty, price, cost in order["items"]:
-        rows += (
-            f"<tr><td class='n'>{html.escape(title)}</td>"
-            f"<td>{qty}</td><td>{fmt_money(price)}</td><td class='r'>{fmt_money(cost)}</td></tr>"
-        )
-    now = datetime.now().strftime("%d.%m.%Y %H:%M")
-    return f"""<!DOCTYPE html>
-<html lang="uz"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Chek</title>
-<style>
-  @page {{ margin: 6mm; }}
-  body {{ font-family: Arial, sans-serif; font-size: 14px; color: #000; max-width: 380px; margin: 0 auto; padding: 10px; }}
-  h2 {{ text-align: center; margin: 0 0 4px; }}
-  .date {{ text-align: center; font-size: 12px; margin-bottom: 10px; }}
-  .info p {{ margin: 3px 0; font-size: 15px; }}
-  table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
-  th, td {{ border-bottom: 1px dashed #000; padding: 5px 2px; text-align: center; }}
-  th {{ border-bottom: 2px solid #000; font-size: 12px; }}
-  td.n {{ text-align: left; }}
-  td.r, th.r {{ text-align: right; }}
-  .total {{ margin-top: 12px; font-size: 18px; font-weight: bold; text-align: right; border-top: 2px solid #000; padding-top: 8px; }}
-  .btn {{ display: block; margin: 16px auto 0; padding: 10px 24px; font-size: 16px; }}
-  @media print {{ .btn {{ display: none; }} }}
-</style></head>
-<body>
-  <h2>🍦 YAYPAN MUZQAYMOQ</h2>
-  <div class="date">{now}</div>
-  <div class="info">
-    <p><b>Ism:</b> {html.escape(order['name'])}</p>
-    <p><b>Telefon:</b> {html.escape(order['phone'])}</p>
-  </div>
-  <table>
-    <tr><th style="text-align:left">Mahsulot</th><th>Soni</th><th>Narxi</th><th class="r">Summa</th></tr>
-    {rows}
-  </table>
-  <div class="total">JAMI: {fmt_money(order['total'])} so'm</div>
-  <button class="btn" onclick="window.print()">🖨 Print</button>
-  <script>window.onload = function() {{ setTimeout(function() {{ window.print(); }}, 400); }};</script>
-</body></html>"""
+def _load_font(size, bold=False):
+    names = (
+        ["DejaVuSans-Bold.ttf", "LiberationSans-Bold.ttf", "arialbd.ttf"] if bold
+        else ["DejaVuSans.ttf", "LiberationSans-Regular.ttf", "arial.ttf"]
+    )
+    dirs = ["", "/usr/share/fonts/truetype/dejavu/", "/usr/share/fonts/dejavu/",
+            "/usr/share/fonts/truetype/liberation/", "/usr/share/fonts/liberation/",
+            "C:/Windows/Fonts/"]
+    for d in dirs:
+        for n in names:
+            try:
+                return ImageFont.truetype(d + n, size)
+            except Exception:
+                pass
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        return ImageFont.load_default()
+
+
+def build_receipt_image(order):
+    W, M = 800, 40
+    f_title, f_b, f_n, f_s = _load_font(44, True), _load_font(30, True), _load_font(28), _load_font(24)
+    x_qty, x_price, x_sum = 420, 580, W - M  # ustun joylari (qty/price - markaz emas, o'ng chet)
+
+    rows = order["items"]
+    H = 330 + len(rows) * 52 + 140
+    img = Image.new("RGB", (W, H), "white")
+    d = ImageDraw.Draw(img)
+
+    def center(text, y, font):
+        w = d.textlength(text, font=font)
+        d.text(((W - w) / 2, y), text, font=font, fill="black")
+
+    def right(text, xr, y, font):
+        w = d.textlength(text, font=font)
+        d.text((xr - w, y), text, font=font, fill="black")
+
+    def fit(text, font, maxw):
+        while d.textlength(text, font=font) > maxw and len(text) > 1:
+            text = text[:-2] + "…"
+        return text
+
+    y = 25
+    center("YAYPAN MUZQAYMOQ", y, f_title); y += 62
+    center(datetime.now().strftime("%d.%m.%Y %H:%M"), y, f_s); y += 50
+    d.text((M, y), "Ism:", font=f_b, fill="black")
+    d.text((M + 90, y), fit(order["name"], f_n, W - 2 * M - 90), font=f_n, fill="black"); y += 46
+    d.text((M, y), "Telefon:", font=f_b, fill="black")
+    d.text((M + 150, y), fit(order["phone"], f_n, W - 2 * M - 150), font=f_n, fill="black"); y += 60
+
+    d.line((M, y, W - M, y), fill="black", width=3); y += 10
+    d.text((M, y), "Mahsulot", font=f_b, fill="black")
+    right("Soni", x_qty, y, f_b)
+    right("Narxi", x_price, y, f_b)
+    right("Summa", x_sum, y, f_b); y += 48
+    d.line((M, y, W - M, y), fill="black", width=3); y += 10
+
+    for title, qty, price, cost in rows:
+        d.text((M, y), fit(title, f_n, 285), font=f_n, fill="black")
+        right(str(qty), x_qty, y, f_n)
+        right(fmt_money(price), x_price, y, f_n)
+        right(fmt_money(cost), x_sum, y, f_n)
+        y += 46
+        d.line((M, y, W - M, y), fill="gray", width=1); y += 6
+
+    y += 14
+    d.line((M, y, W - M, y), fill="black", width=3); y += 16
+    d.text((M, y), "JAMI:", font=f_title, fill="black")
+    right(f"{fmt_money(order['total'])} so'm", W - M, y, f_title)
+
+    buf = io.BytesIO()
+    img.crop((0, 0, W, y + 80)).save(buf, format="PNG")
+    return buf.getvalue()
 
 
 @dp.callback_query(F.data == "print_order")
@@ -209,19 +245,148 @@ async def print_order(callback_query: types.CallbackQuery):
     if not order["items"]:
         await callback_query.answer("Buyurtma tarkibini o'qib bo'lmadi.", show_alert=True)
         return
-    content = build_receipt_html(order).encode("utf-8")
-    safe_name = re.sub(r"[^\w\-]+", "_", order["name"])[:20] or "buyurtma"
-    await callback_query.message.answer_document(
-        BufferedInputFile(content, filename=f"chek_{safe_name}.html"),
-        caption="🖨 Chek tayyor. Faylni oching — print oynasi o'zi chiqadi."
-    )
+    png = build_receipt_image(order)
+    await callback_query.message.answer_photo(BufferedInputFile(png, filename="chek.png"))
     await callback_query.answer("Chek yuborildi ✅")
+
+
+# ---------- Kanalga majburiy obuna ----------
+verified_users = set()      # obunasi tasdiqlangan foydalanuvchilar (bot qayta ishga tushsa qayta tekshiriladi)
+_admin_warned = False
+
+
+async def is_subscribed(user_id):
+    """Foydalanuvchi kanalga a'zomi? (bot kanalda ADMIN bo'lishi shart)"""
+    global _admin_warned
+    try:
+        m = await bot.get_chat_member(CHANNEL, user_id)
+        return m.status in ("member", "administrator", "creator") or (
+            m.status == "restricted" and getattr(m, "is_member", False)
+        )
+    except Exception as e:
+        logging.warning(f"Obunani tekshirib bo'lmadi: {e}")
+        if not _admin_warned:
+            _admin_warned = True
+            try:
+                await bot.send_message(
+                    ADMIN_ID,
+                    f"⚠️ Obunani tekshirib bo'lmadi. Botni {CHANNEL} kanaliga ADMIN qilib qo'shing, "
+                    f"aks holda hamma o'tib ketaveradi.\nXato: {e}"
+                )
+            except Exception:
+                pass
+        return True   # xato bo'lsa mijozlar bloklanib qolmasin
+
+
+def subscribe_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📢 Kanalga obuna bo'lish", url=CHANNEL_URL)],
+        [InlineKeyboardButton(text="✅ Obuna bo'ldim", callback_data="check_sub")],
+    ])
+
+
+async def send_subscribe_prompt(message: types.Message):
+    await send_sticker_safe(message.chat.id, "📢", "👋", "🙏")
+    await message.answer(
+        "Assalomu alaykum! 🍦\n\n"
+        f"Botdan foydalanish uchun avval rasmiy kanalimizga obuna bo'ling:\n👉 {CHANNEL}\n\n"
+        "Obuna bo'lgach, «✅ Obuna bo'ldim» tugmasini bosing.",
+        reply_markup=subscribe_keyboard()
+    )
+
+
+class SubscriptionMiddleware(BaseMiddleware):
+    """Obuna bo'lmagan odam /start dan boshqa hech narsa qila olmaydi."""
+    async def __call__(self, handler, event, data):
+        user = data.get("event_from_user")
+        if user is None or user.id == ADMIN_ID or user.id in verified_users:
+            return await handler(event, data)
+        if isinstance(event, types.Message) and (event.text or "").startswith("/start"):
+            return await handler(event, data)
+        if isinstance(event, types.CallbackQuery) and event.data == "check_sub":
+            return await handler(event, data)
+        if await is_subscribed(user.id):
+            verified_users.add(user.id)
+            return await handler(event, data)
+        if isinstance(event, types.CallbackQuery):
+            await event.answer("Avval kanalga obuna bo'ling!", show_alert=True)
+            if event.message:
+                await send_subscribe_prompt(event.message)
+        elif isinstance(event, types.Message):
+            await send_subscribe_prompt(event)
+        return
+
+
+dp.message.middleware(SubscriptionMiddleware())
+dp.callback_query.middleware(SubscriptionMiddleware())
+
+
+@dp.callback_query(F.data == "check_sub")
+async def check_sub(callback_query: types.CallbackQuery, state: FSMContext):
+    user_id = callback_query.from_user.id
+    if not await is_subscribed(user_id):
+        await callback_query.answer("❌ Siz hali obuna bo'lmagansiz. Avval kanalga obuna bo'ling.", show_alert=True)
+        return
+    verified_users.add(user_id)
+    await callback_query.answer("✅ Obuna tasdiqlandi!")
+    try:
+        await callback_query.message.delete()
+    except Exception:
+        pass
+    await send_sticker_safe(callback_query.message.chat.id, "🎉", "🥳", "👏")
+    await begin_flow(callback_query.message, state, user_id)
+
+
+# ---------- Animatsion stikerlar ----------
+# Telegramdagi tayyor animatsion stiker to'plamlaridan emoji bo'yicha topiladi.
+# Biror to'plam topilmasa bot jim o'tib ketadi (xato bermaydi).
+STICKER_SETS = ["AnimatedEmojies", "animatedemoji", "HotCherry", "TheFoods", "BananaFun"]
+_sticker_cache = {}
+
+
+def _norm(e):
+    return (e or "").replace("\ufe0f", "")
+
+
+async def pick_sticker(*emojis):
+    for set_name in STICKER_SETS:
+        if set_name not in _sticker_cache:
+            try:
+                st = await bot.get_sticker_set(set_name)
+                _sticker_cache[set_name] = [(_norm(x.emoji), x.file_id) for x in st.stickers]
+            except Exception:
+                _sticker_cache[set_name] = []
+        for e in emojis:
+            for emo, fid in _sticker_cache[set_name]:
+                if emo == _norm(e):
+                    return fid
+    return None
+
+
+async def send_sticker_safe(chat_id, *emojis):
+    try:
+        fid = await pick_sticker(*emojis)
+        if fid:
+            await bot.send_sticker(chat_id, fid)
+    except Exception as e:
+        logging.info(f"Stiker yuborilmadi: {e}")
 
 
 # ---------- /start ----------
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
+    await state.clear()
+    if user_id != ADMIN_ID and user_id not in verified_users:
+        if not await is_subscribed(user_id):
+            await message.answer("👋", reply_markup=types.ReplyKeyboardRemove())
+            await send_subscribe_prompt(message)
+            return
+        verified_users.add(user_id)
+    await begin_flow(message, state, user_id)
+
+
+async def begin_flow(message: types.Message, state: FSMContext, user_id: int):
     user_carts[user_id] = {}
     await state.clear()
 
@@ -456,6 +621,7 @@ async def finish_order(message: types.Message, state: FSMContext):
         "Yangi buyurtma berish uchun /start buyrug'ini bosing (yoki pastdagi Menu tugmasi).",
         reply_markup=types.ReplyKeyboardRemove()
     )
+    await send_sticker_safe(message.chat.id, "🍦", "❤", "👍", "✅")
     await state.clear()
 
 
