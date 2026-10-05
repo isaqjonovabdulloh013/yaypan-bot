@@ -576,4 +576,175 @@ async def finish_order(message: types.Message, state: FSMContext):
     items_summary = []
 
     for prod_key, total_items in cart.items():
-        if prod_key
+        if prod_key in PRODUCTS:
+            prod = PRODUCTS[prod_key]
+            cost = total_items * prod['price']
+            total_price += cost
+            order_details += f"• {prod['name']}: {total_items} ta × {prod['price']} = {cost} so'm\n"
+            items_summary.append(f"{prod['name']} ({total_items}ta)")
+
+    user_saved_info = saved_users.get(str(user_id)) or {}
+    user_name = data.get('name') or user_saved_info.get('name') or "Noma’lum"
+    user_phone = data.get('phone') or user_saved_info.get('phone') or "-"
+
+    # Сохранение заказа для API
+    new_order = {
+        "id": len(orders_db) + 1,
+        "clientName": user_name,
+        "phone": user_phone,
+        "items": ", ".join(items_summary),
+        "totalPrice": total_price,
+        "status": "Yangi"
+    }
+    orders_db.append(new_order)
+    save_json(ORDERS_FILE, orders_db)
+
+    admin_message = (
+        f"📥 <b>Yangi buyurtma keldi! (bot)</b>\n\n"
+        f"{info_text(user_name, data.get('location', '-'), user_phone)}\n\n"
+        f"🛍 <b>Buyurtma tarkibi:</b>\n{order_details}\n"
+        f"💳 <b>Umumiy summa:</b> {total_price} so'm"
+    )
+    await bot.send_message(ADMIN_ID, admin_message, parse_mode="HTML", reply_markup=admin_order_keyboard(user_id, total_price))
+
+    user_carts[user_id] = {}
+    await message.answer(
+        "Buyurtmangiz muvaffaqiyatli yuborildi! ✅ Tez orada siz bilan bog'lanishadi.\n\n"
+        "Yangi buyurtma berish uchun /start buyrug'ini bosing.",
+        reply_markup=types.ReplyKeyboardRemove()
+    )
+    await send_sticker_safe(message.chat.id, "🍦", "❤", "👍", "✅")
+    await state.clear()
+
+# ---------- Оплата и долги (Админ) ----------
+@dp.callback_query(F.data.startswith('pay_full_'))
+async def process_pay_full(callback_query: types.CallbackQuery):
+    if callback_query.from_user.id != ADMIN_ID:
+        return
+    _, _, target_user_id, total_price = callback_query.data.split('_')
+    
+    try:
+        await bot.send_message(int(target_user_id), f"Buyurtmangiz uchun to'lov qabul qilindi. Rahmat! ✅")
+    except Exception:
+        pass
+
+    await callback_query.message.reply(f"To'lov to'liq qabul qilindi. Mijozga qarz yozilmadi. ✅")
+    await callback_query.answer()
+
+@dp.callback_query(F.data.startswith('pay_debt_'))
+async def process_pay_debt(callback_query: types.CallbackQuery):
+    if callback_query.from_user.id != ADMIN_ID:
+        return
+    _, _, target_user_id, total_price = callback_query.data.split('_')
+    
+    order_info = parse_order_text(callback_query.message.text or callback_query.message.caption or "")
+    total_debt = add_user_debt(target_user_id, order_info['name'], order_info['phone'], int(total_price))
+
+    try:
+        await bot.send_message(
+            int(target_user_id), 
+            f"Buyurtmangiz qarzga rasmiylashtirildi.\n"
+            f"Ushbu buyurtma: {total_price} so'm.\n"
+            f"Umumiy qarzingiz: {total_debt} so'm."
+        )
+    except Exception:
+        pass
+
+    await callback_query.message.reply(f"Mijoz qarziga {total_price} so'm qo'shildi. Umumiy qarzi: {total_debt} so'm.")
+    await callback_query.answer()
+
+@dp.callback_query(F.data.startswith('pay_part_'))
+async def process_pay_part(callback_query: types.CallbackQuery, state: FSMContext):
+    if callback_query.from_user.id != ADMIN_ID:
+        return
+    _, _, target_user_id, total_price = callback_query.data.split('_')
+    
+    await state.update_data(
+        target_user_id=target_user_id, 
+        total_price=int(total_price), 
+        msg_text=callback_query.message.text or callback_query.message.caption or ""
+    )
+    await callback_query.message.reply("Olingan summani kiriting (masalan 20000):")
+    await state.set_state(OrderState.waiting_for_partial_pay)
+    await callback_query.answer()
+
+@dp.message(OrderState.waiting_for_partial_pay)
+async def process_partial_pay_input(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    if not message.text or not message.text.isdigit():
+        await message.answer("Iltimos, faqat raqam kiriting:")
+        return
+
+    paid = int(message.text)
+    data = await state.get_data()
+    target_user_id = data['target_user_id']
+    total_price = data['total_price']
+    
+    debt_to_add = total_price - paid
+    order_info = parse_order_text(data.get('msg_text', ''))
+    
+    if debt_to_add > 0:
+        total_debt = add_user_debt(target_user_id, order_info['name'], order_info['phone'], debt_to_add)
+        msg_text = f"Qolgan {debt_to_add} so'm qarzga yozildi. Umumiy qarzi: {total_debt} so'm."
+        try:
+            await bot.send_message(
+                int(target_user_id), 
+                f"Siz {paid} so'm to'ladingiz.\n"
+                f"Qolgan {debt_to_add} so'm qarzga yozildi.\n"
+                f"Umumiy qarzingiz: {total_debt} so'm."
+            )
+        except Exception:
+            pass
+    else:
+        msg_text = "To'lov to'liq qoplandi, qarz yozilmadi."
+
+    await message.answer(msg_text)
+    await state.clear()
+
+# ---------- API (Для мобильного приложения) ----------
+async def get_orders_api(request):
+    return web.json_response(orders_db)
+
+async def get_debts_api(request):
+    return web.json_response(debts_db)
+
+async def handle_ping(request):
+    return web.Response(text="Bot va API ishlamoqda!")
+
+async def setup_bot_menu():
+    await bot.set_my_commands([
+        BotCommand(command="start", description="🍦 Buyurtma berishni boshlash"),
+    ])
+    await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+
+async def main():
+    app = web.Application()
+    
+    # Маршруты HTTP
+    app.router.add_get("/", handle_ping)
+    app.router.add_get("/api/orders", get_orders_api)
+    app.router.add_get("/api/debts", get_debts_api)
+
+    # Настройка CORS
+    cors = aiohttp_cors.setup(app, defaults={
+        "*": aiohttp_cors.ResourceOptions(
+            allow_credentials=True,
+            expose_headers="*",
+            allow_headers="*",
+        )
+    })
+    for route in list(app.router.routes()):
+        cors.add(route)
+
+    port = int(os.environ.get("PORT", 8080))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+
+    await setup_bot_menu()
+    await dp.start_polling(bot)
+
+if __name__ == '__main__':
+    asyncio.run(main())
