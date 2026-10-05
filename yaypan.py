@@ -67,6 +67,8 @@ class OrderState(StatesGroup):
     shopping = State()
     waiting_for_custom_count = State()
     waiting_for_partial_pay = State()
+    waiting_for_admin_debt_add = State()
+    waiting_for_admin_debt_sub = State()
 
 user_carts = {}
 
@@ -103,7 +105,7 @@ def delete_saved_user(user_id):
         del saved_users[str(user_id)]
         save_json(USERS_FILE, saved_users)
 
-def add_user_debt(user_id, name, phone, added_amount):
+def add_user_debt(user_id, name, phone, added_amount, items_str=""):
     uid = str(user_id)
     if (not name or name == "-") and uid in saved_users:
         name = saved_users[uid].get("name", "Noma'lum")
@@ -111,23 +113,52 @@ def add_user_debt(user_id, name, phone, added_amount):
         phone = saved_users[uid].get("phone", "Noma'lum")
 
     if uid not in debts_db:
-        debts_db[uid] = {"name": name or "Noma'lum", "phone": phone or "Noma'lum", "debt": 0}
+        debts_db[uid] = {"name": name or "Noma'lum", "phone": phone or "Noma'lum", "debt": 0, "history": []}
     
+    if "history" not in debts_db[uid]:
+        debts_db[uid]["history"] = []
+
     debts_db[uid]["debt"] += added_amount
     if name and name != "-":
         debts_db[uid]["name"] = name
     if phone and phone != "-":
         debts_db[uid]["phone"] = phone
 
+    if added_amount > 0:
+        now_str = datetime.now().strftime("%d.%m.%Y %H:%M")
+        debts_db[uid]["history"].append({
+            "date": now_str,
+            "items": items_str or "Qarz qo'shildi",
+            "amount": added_amount
+        })
+
     save_json(DEBTS_FILE, debts_db)
     return debts_db[uid]["debt"]
+
+def get_formatted_debt_text(user_id):
+    uid = str(user_id)
+    if uid not in debts_db or debts_db[uid].get("debt", 0) <= 0:
+        return "Sizda qarz yo'q! ✅"
+
+    u = debts_db[uid]
+    history = u.get("history", [])
+    
+    text = f"📋 <b>QARZLARINGIZ TARIXI ({html.escape(u.get('name', ''))}):</b>\n\n"
+    for i, item in enumerate(history, 1):
+        text += f"<b>{i}. {item['date']}</b>\n"
+        text += f"🍦 Mahsulot: {item['items']}\n"
+        text += f"💰 Qarz: {item['amount']:,} so'm\n"
+        text += "-------------------------\n"
+    
+    text += f"\n💳 <b>JAMI QARZINGIZ: {u['debt']:,} so'm</b>"
+    return text
 
 # ---------- Клавиатуры ----------
 main_menu_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🛒 Savatni ko'rish"), KeyboardButton(text="✅ Buyurtmani yakunlash")],
-        [KeyboardButton(text="🍦 Mini App", web_app=WebAppInfo(url=WEBAPP_URL)),
-         KeyboardButton(text="✏️ Ma'lumotlarni o'zgartirish")],
+        [KeyboardButton(text="🍦 Mini App"), KeyboardButton(text="📄 Mening qarzdorligim")],
+        [KeyboardButton(text="✏️ Ma'lumotlarni o'zgartirish")]
     ],
     resize_keyboard=True
 )
@@ -164,14 +195,17 @@ def parse_order_text(text):
     total_match = re.search(r"Umumiy summa:\s*([\d\s]+)", text)
     
     items = []
+    items_raw = []
     for m in re.finditer(r"•\s*(.+?):\s*(\d+)\s*ta\s*[×x]\s*(\d+)\s*=\s*(\d+)", text):
         title = re.sub(r"^\d+\.\s*", "", m.group(1).strip())
         items.append((title, int(m.group(2)), int(m.group(3)), int(m.group(4))))
+        items_raw.append(f"{title} ({m.group(2)}ta)")
         
     return {
         "name": name_match.group(1).strip() if name_match else "-",
         "phone": phone_match.group(1).strip() if phone_match else "-",
         "items": items,
+        "items_summary": ", ".join(items_raw),
         "total": int(re.sub(r"\s", "", total_match.group(1))) if total_match and total_match.group(1).strip() else sum(i[3] for i in items),
     }
 
@@ -416,6 +450,11 @@ async def change_info(message: types.Message, state: FSMContext):
     await message.answer("Yangi Ism va Familiyangizni kiriting:", reply_markup=types.ReplyKeyboardRemove())
     await state.set_state(OrderState.waiting_for_name)
 
+@dp.message(F.text == "📄 Mening qarzdorligim")
+async def my_debt_handler(message: types.Message):
+    debt_text = get_formatted_debt_text(message.from_user.id)
+    await message.answer(debt_text, parse_mode="HTML")
+
 @dp.message(OrderState.waiting_for_name)
 async def process_name(message: types.Message, state: FSMContext):
     await state.update_data(name=message.text)
@@ -616,7 +655,116 @@ async def finish_order(message: types.Message, state: FSMContext):
     await send_sticker_safe(message.chat.id, "🍦", "❤", "👍", "✅")
     await state.clear()
 
-# ---------- Оплата и долги (Админ) ----------
+# ---------- Админ Панель Должников ----------
+@dp.message(Command("debts"))
+async def admin_debts_list(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    if not debts_db:
+        await message.answer("Qarzdorlar ro'yxati bo'sh.")
+        return
+
+    text = "📋 <b>QARZDORLAR RO'YXATI:</b>\n\n"
+    keyboard_buttons = []
+    
+    for uid, udata in debts_db.items():
+        debt = udata.get("debt", 0)
+        name = udata.get("name", "Noma'lum")
+        phone = udata.get("phone", "-")
+        text += f"👤 <b>{html.escape(name)}</b> ({phone})\n💳 Qarz: {debt:,} so'm\n\n"
+        keyboard_buttons.append([InlineKeyboardButton(text=f"👤 {name} ({debt:,} so'm)", callback_data=f"manage_debt_{uid}")])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
+    await message.answer(text, parse_mode="HTML", reply_markup=kb)
+
+@dp.callback_query(F.data.startswith('manage_debt_'))
+async def manage_user_debt(callback_query: types.CallbackQuery):
+    if callback_query.from_user.id != ADMIN_ID:
+        return
+    uid = callback_query.data.split('_')[2]
+    u = debts_db.get(uid)
+    if not u:
+        await callback_query.answer("Mijoz topilmadi.", show_alert=True)
+        return
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Qarz qo'shish", callback_data=f"add_debt_{uid}"),
+         InlineKeyboardButton(text="➖ Qarzni ayirish / to'lash", callback_data=f"sub_debt_{uid}")],
+        [InlineKeyboardButton(text="🔙 Ro'yxatga qaytish", callback_data="back_to_debts")]
+    ])
+    
+    await callback_query.message.edit_text(
+        f"👤 <b>Mijoz:</b> {html.escape(u['name'])}\n"
+        f"📞 <b>Tel:</b> {u['phone']}\n"
+        f"💳 <b>Hozirgi qarzi:</b> {u['debt']:,} so'm\n\n"
+        f"Amalni tanlang:",
+        parse_mode="HTML",
+        reply_markup=kb
+    )
+    await callback_query.answer()
+
+@dp.callback_query(F.data == "back_to_debts")
+async def back_to_debts_handler(callback_query: types.CallbackQuery):
+    await callback_query.message.delete()
+    await admin_debts_list(callback_query.message)
+
+@dp.callback_query(F.data.startswith('add_debt_'))
+async def start_add_debt(callback_query: types.CallbackQuery, state: FSMContext):
+    uid = callback_query.data.split('_')[2]
+    await state.update_data(target_uid=uid)
+    await callback_query.message.answer("Qancha qarz qo'shmoqchisiz? Summani kiriting:")
+    await state.set_state(OrderState.waiting_for_admin_debt_add)
+    await callback_query.answer()
+
+@dp.message(OrderState.waiting_for_admin_debt_add)
+async def process_admin_add_debt(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID or not message.text.isdigit():
+        await message.answer("Faqat raqam kiriting:")
+        return
+    amount = int(message.text)
+    data = await state.get_data()
+    uid = data['target_uid']
+    
+    total_debt = add_user_debt(uid, "-", "-", amount, items_str="Admin tomonidan qo'shildi")
+    await message.answer(f"Mijozga {amount:,} so'm qarz qo'shildi. Umumiy qarzi: {total_debt:,} so'm.")
+    
+    try:
+        await bot.send_message(int(uid), f"Qarzingizga {amount:,} so'm qo'shildi.\n\n" + get_formatted_debt_text(uid), parse_mode="HTML")
+    except Exception:
+        pass
+    await state.clear()
+
+@dp.callback_query(F.data.startswith('sub_debt_'))
+async def start_sub_debt(callback_query: types.CallbackQuery, state: FSMContext):
+    uid = callback_query.data.split('_')[2]
+    await state.update_data(target_uid=uid)
+    await callback_query.message.answer("Qancha summani ayirmoqchisiz (to'ladi)? Summani kiriting:")
+    await state.set_state(OrderState.waiting_for_admin_debt_sub)
+    await callback_query.answer()
+
+@dp.message(OrderState.waiting_for_admin_debt_sub)
+async def process_admin_sub_debt(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID or not message.text.isdigit():
+        await message.answer("Faqat raqam kiriting:")
+        return
+    amount = int(message.text)
+    data = await state.get_data()
+    uid = data['target_uid']
+    
+    if uid in debts_db:
+        debts_db[uid]["debt"] = max(0, debts_db[uid]["debt"] - amount)
+        save_json(DEBTS_FILE, debts_db)
+        total_debt = debts_db[uid]["debt"]
+        await message.answer(f"Qarz {amount:,} so'mga kamaytirildi. Qolgan qarz: {total_debt:,} so'm.")
+        
+        try:
+            await bot.send_message(int(uid), f"Qarzingizdan {amount:,} so'm to'landi va olib tashlandi.\n\n" + get_formatted_debt_text(uid), parse_mode="HTML")
+        except Exception:
+            pass
+    await state.clear()
+
+# ---------- Оплата и долги при заказе (Админ) ----------
 @dp.callback_query(F.data.startswith('pay_full_'))
 async def process_pay_full(callback_query: types.CallbackQuery):
     if callback_query.from_user.id != ADMIN_ID:
@@ -638,15 +786,11 @@ async def process_pay_debt(callback_query: types.CallbackQuery):
     _, _, target_user_id, total_price = callback_query.data.split('_')
     
     order_info = parse_order_text(callback_query.message.text or callback_query.message.caption or "")
-    total_debt = add_user_debt(target_user_id, order_info['name'], order_info['phone'], int(total_price))
+    total_debt = add_user_debt(target_user_id, order_info['name'], order_info['phone'], int(total_price), items_str=order_info['items_summary'])
 
     try:
-        await bot.send_message(
-            int(target_user_id), 
-            f"Buyurtmangiz qarzga rasmiylashtirildi.\n"
-            f"Ushbu buyurtma: {total_price} so'm.\n"
-            f"Umumiy qarzingiz: {total_debt} so'm."
-        )
+        debt_msg = f"Buyurtmangiz qarzga rasmiylashtirildi.\n\n" + get_formatted_debt_text(target_user_id)
+        await bot.send_message(int(target_user_id), debt_msg, parse_mode="HTML")
     except Exception:
         pass
 
@@ -685,15 +829,11 @@ async def process_partial_pay_input(message: types.Message, state: FSMContext):
     order_info = parse_order_text(data.get('msg_text', ''))
     
     if debt_to_add > 0:
-        total_debt = add_user_debt(target_user_id, order_info['name'], order_info['phone'], debt_to_add)
+        total_debt = add_user_debt(target_user_id, order_info['name'], order_info['phone'], debt_to_add, items_str=order_info['items_summary'])
         msg_text = f"Qolgan {debt_to_add} so'm qarzga yozildi. Umumiy qarzi: {total_debt} so'm."
         try:
-            await bot.send_message(
-                int(target_user_id), 
-                f"Siz {paid} so'm to'ladingiz.\n"
-                f"Qolgan {debt_to_add} so'm qarzga yozildi.\n"
-                f"Umumiy qarzingiz: {total_debt} so'm."
-            )
+            debt_msg = f"Siz {paid} so'm to'ladingiz. Qolgan {debt_to_add} so'm qarzga yozildi.\n\n" + get_formatted_debt_text(target_user_id)
+            await bot.send_message(int(target_user_id), debt_msg, parse_mode="HTML")
         except Exception:
             pass
     else:
@@ -715,6 +855,7 @@ async def handle_ping(request):
 async def setup_bot_menu():
     await bot.set_my_commands([
         BotCommand(command="start", description="🍦 Buyurtma berishni boshlash"),
+        BotCommand(command="debts", description="📋 Qarzdorlar ro'yxati (Admin)"),
     ])
     await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
 
