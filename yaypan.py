@@ -22,7 +22,7 @@ from aiogram.types import (
 
 TOKEN = os.environ.get("BOT_TOKEN", "8941827736:AAE_9frRYe2r2FKhwcL9QK8eoOcXtmCf34w")
 ADMIN_ID = 8488328091
-WEBAPP_URL = "https://yaypanmuzqamoq.netlify.app"
+WEBAPP_URL = "https://yaypanmuzqamoq.netlify.app/"
 USERS_FILE = "users.json"
 DEBTS_FILE = "debts.json"    # База долгов
 ORDERS_FILE = "orders.json"  # База заказов
@@ -157,7 +157,7 @@ def get_formatted_debt_text(user_id):
 main_menu_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🛒 Savatni ko'rish"), KeyboardButton(text="✅ Buyurtmani yakunlash")],
-        [KeyboardButton(text="🍦 Mini App"), KeyboardButton(text="📄 Mening qarzdorligim")],
+        [KeyboardButton(text="🍦 Mini App", web_app=WebAppInfo(url=WEBAPP_URL)), KeyboardButton(text="📄 Mening qarzdorligim")],
         [KeyboardButton(text="✏️ Ma'lumotlarni o'zgartirish")]
     ],
     resize_keyboard=True
@@ -315,7 +315,7 @@ async def is_subscribed(user_id):
             try:
                 await bot.send_message(
                     ADMIN_ID,
-                    f"⚠️ Obunani tekshirib bo'lmadi. Botni {CHANNEL} kanaliga ADMIN qilib qo'shing.\nXato: {e}"
+                    f"⚠️️ Obunani tekshirib bo'lmadi. Botni {CHANNEL} kanaliga ADMIN qilib qo'shing.\nXato: {e}"
                 )
             except Exception:
                 pass
@@ -508,6 +508,74 @@ async def process_save(callback_query: types.CallbackQuery, state: FSMContext):
     await show_catalog(callback_query.message)
     await state.set_state(OrderState.shopping)
 
+# ---------- Обработка данных из WebApp (Mini App) ----------
+@dp.message(F.web_app_data)
+async def handle_web_app_data(message: types.Message):
+    user_id = message.from_user.id
+    raw_data = message.web_app_data.data
+
+    try:
+        data_json = json.loads(raw_data)
+    except Exception:
+        data_json = {}
+
+    user_saved_info = saved_users.get(str(user_id)) or {}
+    user_name = data_json.get("name") or user_saved_info.get("name") or message.from_user.full_name
+    user_phone = data_json.get("phone") or user_saved_info.get("phone") or "-"
+    user_loc = data_json.get("location") or user_saved_info.get("location") or "-"
+
+    items_list = data_json.get("items", [])
+    total_price = 0
+    order_details = ""
+    items_summary = []
+
+    if isinstance(items_list, list) and items_list:
+        for idx, item in enumerate(items_list, 1):
+            title = item.get("name", "Mahsulot")
+            qty = int(item.get("count", item.get("quantity", 1)))
+            price = int(item.get("price", 0))
+            cost = qty * price
+            total_price += cost
+            order_details += f"• {idx}. {title}: {qty} ta × {price} = {cost} so'm\n"
+            items_summary.append(f"{title} ({qty}ta)")
+    else:
+        # Текстовый резерв
+        order_details = str(raw_data)
+        total_price = int(data_json.get("totalPrice", 0))
+
+    if not total_price and "totalPrice" in data_json:
+        total_price = int(data_json.get("totalPrice", 0))
+
+    new_order = {
+        "id": len(orders_db) + 1,
+        "clientName": user_name,
+        "phone": user_phone,
+        "items": ", ".join(items_summary) if items_summary else order_details,
+        "totalPrice": total_price,
+        "status": "Yangi"
+    }
+    orders_db.append(new_order)
+    save_json(ORDERS_FILE, orders_db)
+
+    admin_message = (
+        f"📥 <b>Yangi buyurtma keldi! (Mini App)</b>\n\n"
+        f"{info_text(user_name, user_loc, user_phone)}\n\n"
+        f"🛍 <b>Buyurtma tarkibi:</b>\n{order_details}\n"
+        f"💳 <b>Umumiy summa:</b> {total_price} so'm"
+    )
+    await bot.send_message(
+        ADMIN_ID,
+        admin_message,
+        parse_mode="HTML",
+        reply_markup=admin_order_keyboard(user_id, total_price)
+    )
+
+    await message.answer(
+        "Buyurtmangiz Mini App orqali muvaffaqiyatli qabul qilindi! ✅ Tez orada siz bilan bog'lanishadi.",
+        reply_markup=main_menu_keyboard
+    )
+    await send_sticker_safe(message.chat.id, "🍦", "❤", "👍", "✅")
+
 # ---------- Каталог ----------
 async def show_catalog(message: types.Message):
     for key, prod in PRODUCTS.items():
@@ -600,7 +668,7 @@ async def remove_from_cart(callback_query: types.CallbackQuery):
             text, kb = build_cart(cart)
             await callback_query.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
 
-# ---------- Завершение заказа ----------
+# ---------- Завершение заказа из Telegram ----------
 @dp.message(F.text == "✅ Buyurtmani yakunlash", OrderState.shopping)
 async def finish_order(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
@@ -650,7 +718,7 @@ async def finish_order(message: types.Message, state: FSMContext):
     await message.answer(
         "Buyurtmangiz muvaffaqiyatli yuborildi! ✅ Tez orada siz bilan bog'lanishadi.\n\n"
         "Yangi buyurtma berish uchun /start buyrug'ini bosing.",
-        reply_markup=types.ReplyKeyboardRemove()
+        reply_markup=main_menu_keyboard
     )
     await send_sticker_safe(message.chat.id, "🍦", "❤", "👍", "✅")
     await state.clear()
