@@ -19,12 +19,12 @@ from aiogram.types import (
     WebAppInfo, BotCommand, MenuButtonCommands, BufferedInputFile,
 )
 
-# Tokenni Render'da "BOT_TOKEN" environment variable sifatida qo'yish tavsiya etiladi
 TOKEN = os.environ.get("BOT_TOKEN", "8941827736:AAE_9frRYe2r2FKhwcL9QK8eoOcXtmCf34w")
 ADMIN_ID = 8488328091
 WEBAPP_URL = "https://yaypanmuzqamoq.netlify.app"
 USERS_FILE = "users.json"
-CHANNEL = "@YAYPAN_muzqaymoq"                      # majburiy obuna kanali
+DEBTS_FILE = "debts.json"  # Qarzlar bazasi
+CHANNEL = "@YAYPAN_muzqaymoq"
 CHANNEL_URL = "https://t.me/YAYPAN_muzqaymoq"
 
 logging.basicConfig(level=logging.INFO)
@@ -57,7 +57,6 @@ PRODUCTS = {
     "banan": {"name": "21. Banan", "count_in_box": 48, "price": 1600, "photo": "https://t.me/YAYPAN_muzqaymoq/34"},
 }
 
-
 class OrderState(StatesGroup):
     waiting_for_name = State()
     waiting_for_location = State()
@@ -65,19 +64,17 @@ class OrderState(StatesGroup):
     waiting_for_save = State()
     shopping = State()
     waiting_for_custom_count = State()
-
+    waiting_for_partial_pay = State() # Qisman to'lov kiritish uchun
 
 user_carts = {}
 
-
-# ---------- Saqlangan foydalanuvchilar (users.json) ----------
+# ---------- Saqlangan foydalanuvchilar ----------
 def load_users():
     try:
         with open(USERS_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return {}
-
 
 def save_users(users):
     try:
@@ -86,24 +83,46 @@ def save_users(users):
     except Exception as e:
         logging.error(f"users.json yozishda xato: {e}")
 
-
 saved_users = load_users()
-
 
 def get_saved_user(user_id):
     return saved_users.get(str(user_id))
 
-
 def set_saved_user(user_id, name, location, phone):
     saved_users[str(user_id)] = {"name": name, "location": location, "phone": phone}
     save_users(saved_users)
-
 
 def delete_saved_user(user_id):
     if str(user_id) in saved_users:
         del saved_users[str(user_id)]
         save_users(saved_users)
 
+# ---------- Qarzlar bazasi (debts.json) ----------
+def load_debts():
+    try:
+        with open(DEBTS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def save_debts(debts):
+    try:
+        with open(DEBTS_FILE, "w", encoding="utf-8") as f:
+            json.dump(debts, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logging.error(f"debts.json yozishda xato: {e}")
+
+debts_db = load_debts()
+
+def add_user_debt(user_id, name, phone, added_amount):
+    uid = str(user_id)
+    if uid not in debts_db:
+        debts_db[uid] = {"name": name, "phone": phone, "debt": 0}
+    debts_db[uid]["debt"] += added_amount
+    debts_db[uid]["name"] = name
+    debts_db[uid]["phone"] = phone
+    save_debts(debts_db)
+    return debts_db[uid]["debt"]
 
 # ---------- Klaviaturalar ----------
 main_menu_keyboard = ReplyKeyboardMarkup(
@@ -122,7 +141,6 @@ save_keyboard = InlineKeyboardMarkup(inline_keyboard=[
     ]
 ])
 
-
 def info_text(name, location, phone):
     return (
         f"👤 <b>Ism:</b> {html.escape(str(name))}\n"
@@ -130,27 +148,26 @@ def info_text(name, location, phone):
         f"📞 <b>Telefon:</b> {html.escape(str(phone))}"
     )
 
-
-# ---------- Admin tugmalari va chek (print) ----------
-def admin_order_keyboard(user_id):
+# ---------- Admin tugmalari (Qarz boshqaruvi bilan) ----------
+def admin_order_keyboard(user_id, total_price):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🚚 Yetkazilmoqda", callback_data=f"deliv_{user_id}")],
+        [InlineKeyboardButton(text="💵 Pulni oldim (Qarz yo'q)", callback_data=f"pay_full_{user_id}_{total_price}")],
+        [InlineKeyboardButton(text="📝 To'liq qarzga berildi", callback_data=f"pay_debt_{user_id}_{total_price}")],
+        [InlineKeyboardButton(text="⚡ Qisman to'landi", callback_data=f"pay_part_{user_id}_{total_price}")],
         [InlineKeyboardButton(text="🖨 Print qilish", callback_data="print_order")],
     ])
-
 
 def fmt_money(n):
     return f"{int(n):,}".replace(",", " ")
 
-
 def parse_order_text(text):
-    """Admin xabaridan ism, telefon, mahsulotlar va jami summani ajratib oladi."""
     name = re.search(r"Ism:\s*(.+)", text)
     phone = re.search(r"Telefon:\s*(.+)", text)
     total = re.search(r"Umumiy summa:\s*([\d\s]+)", text)
     items = []
     for m in re.finditer(r"•\s*(.+?):\s*(\d+)\s*ta\s*[×x]\s*(\d+)\s*=\s*(\d+)", text):
-        title = re.sub(r"^\d+\.\s*", "", m.group(1).strip())  # "21. Banan" -> "Banan"
+        title = re.sub(r"^\d+\.\s*", "", m.group(1).strip())
         items.append((title, int(m.group(2)), int(m.group(3)), int(m.group(4))))
     return {
         "name": name.group(1).strip() if name else "-",
@@ -158,7 +175,6 @@ def parse_order_text(text):
         "items": items,
         "total": int(re.sub(r"\s", "", total.group(1))) if total and total.group(1).strip() else sum(i[3] for i in items),
     }
-
 
 def _load_font(size, bold=False):
     names = (
@@ -179,11 +195,10 @@ def _load_font(size, bold=False):
     except TypeError:
         return ImageFont.load_default()
 
-
 def build_receipt_image(order):
     W, M = 800, 40
     f_title, f_b, f_n, f_s = _load_font(44, True), _load_font(30, True), _load_font(28), _load_font(24)
-    x_qty, x_price, x_sum = 420, 580, W - M  # ustun joylari (qty/price - markaz emas, o'ng chet)
+    x_qty, x_price, x_sum = 420, 580, W - M
 
     rows = order["items"]
     H = 330 + len(rows) * 52 + 140
@@ -235,7 +250,6 @@ def build_receipt_image(order):
     img.crop((0, 0, W, y + 80)).save(buf, format="PNG")
     return buf.getvalue()
 
-
 @dp.callback_query(F.data == "print_order")
 async def print_order(callback_query: types.CallbackQuery):
     if callback_query.from_user.id != ADMIN_ID:
@@ -249,14 +263,11 @@ async def print_order(callback_query: types.CallbackQuery):
     await callback_query.message.answer_photo(BufferedInputFile(png, filename="chek.png"))
     await callback_query.answer("Chek yuborildi ✅")
 
-
 # ---------- Kanalga majburiy obuna ----------
-verified_users = set()      # obunasi tasdiqlangan foydalanuvchilar (bot qayta ishga tushsa qayta tekshiriladi)
+verified_users = set()
 _admin_warned = False
 
-
 async def is_subscribed(user_id):
-    """Foydalanuvchi kanalga a'zomi? (bot kanalda ADMIN bo'lishi shart)"""
     global _admin_warned
     try:
         m = await bot.get_chat_member(CHANNEL, user_id)
@@ -270,20 +281,17 @@ async def is_subscribed(user_id):
             try:
                 await bot.send_message(
                     ADMIN_ID,
-                    f"⚠️ Obunani tekshirib bo'lmadi. Botni {CHANNEL} kanaliga ADMIN qilib qo'shing, "
-                    f"aks holda hamma o'tib ketaveradi.\nXato: {e}"
+                    f"⚠️ Obunani tekshirib bo'lmadi. Botni {CHANNEL} kanaliga ADMIN qilib qo'shing.\nXato: {e}"
                 )
             except Exception:
                 pass
-        return True   # xato bo'lsa mijozlar bloklanib qolmasin
-
+        return True
 
 def subscribe_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📢 Kanalga obuna bo'lish", url=CHANNEL_URL)],
         [InlineKeyboardButton(text="✅ Obuna bo'ldim", callback_data="check_sub")],
     ])
-
 
 async def send_subscribe_prompt(message: types.Message):
     await send_sticker_safe(message.chat.id, "📢", "👋", "🙏")
@@ -294,9 +302,7 @@ async def send_subscribe_prompt(message: types.Message):
         reply_markup=subscribe_keyboard()
     )
 
-
 class SubscriptionMiddleware(BaseMiddleware):
-    """Obuna bo'lmagan odam /start dan boshqa hech narsa qila olmaydi."""
     async def __call__(self, handler, event, data):
         user = data.get("event_from_user")
         if user is None or user.id == ADMIN_ID or user.id in verified_users:
@@ -316,10 +322,8 @@ class SubscriptionMiddleware(BaseMiddleware):
             await send_subscribe_prompt(event)
         return
 
-
 dp.message.middleware(SubscriptionMiddleware())
 dp.callback_query.middleware(SubscriptionMiddleware())
-
 
 @dp.callback_query(F.data == "check_sub")
 async def check_sub(callback_query: types.CallbackQuery, state: FSMContext):
@@ -336,17 +340,12 @@ async def check_sub(callback_query: types.CallbackQuery, state: FSMContext):
     await send_sticker_safe(callback_query.message.chat.id, "🎉", "🥳", "👏")
     await begin_flow(callback_query.message, state, user_id)
 
-
 # ---------- Animatsion stikerlar ----------
-# Telegramdagi tayyor animatsion stiker to'plamlaridan emoji bo'yicha topiladi.
-# Biror to'plam topilmasa bot jim o'tib ketadi (xato bermaydi).
 STICKER_SETS = ["AnimatedEmojies", "animatedemoji", "HotCherry", "TheFoods", "BananaFun"]
 _sticker_cache = {}
 
-
 def _norm(e):
     return (e or "").replace("\ufe0f", "")
-
 
 async def pick_sticker(*emojis):
     for set_name in STICKER_SETS:
@@ -362,7 +361,6 @@ async def pick_sticker(*emojis):
                     return fid
     return None
 
-
 async def send_sticker_safe(chat_id, *emojis):
     try:
         fid = await pick_sticker(*emojis)
@@ -370,7 +368,6 @@ async def send_sticker_safe(chat_id, *emojis):
             await bot.send_sticker(chat_id, fid)
     except Exception as e:
         logging.info(f"Stiker yuborilmadi: {e}")
-
 
 # ---------- /start ----------
 @dp.message(Command("start"))
@@ -385,14 +382,12 @@ async def cmd_start(message: types.Message, state: FSMContext):
         verified_users.add(user_id)
     await begin_flow(message, state, user_id)
 
-
 async def begin_flow(message: types.Message, state: FSMContext, user_id: int):
     user_carts[user_id] = {}
     await state.clear()
 
     saved = get_saved_user(user_id)
     if saved:
-        # Saqlangan odam: ma'lumot so'ralmaydi, darhol katalog
         await state.update_data(name=saved["name"], location=saved["location"], phone=saved["phone"])
         await message.answer(
             f"Assalomu alaykum, <b>{html.escape(saved['name'])}</b>! 🍦\n"
@@ -413,7 +408,6 @@ async def begin_flow(message: types.Message, state: FSMContext, user_id: int):
     )
     await state.set_state(OrderState.waiting_for_name)
 
-
 @dp.message(F.text == "✏️ Ma'lumotlarni o'zgartirish")
 async def change_info(message: types.Message, state: FSMContext):
     delete_saved_user(message.from_user.id)
@@ -422,18 +416,15 @@ async def change_info(message: types.Message, state: FSMContext):
     await message.answer("Yangi Ism va Familiyangizni kiriting:", reply_markup=types.ReplyKeyboardRemove())
     await state.set_state(OrderState.waiting_for_name)
 
-
 @dp.message(OrderState.waiting_for_name)
 async def process_name(message: types.Message, state: FSMContext):
     await state.update_data(name=message.text)
     await message.answer("Endi manzilingizni (qaysi joyda ekaningizni) yozib yuboring:")
     await state.set_state(OrderState.waiting_for_location)
 
-
 @dp.message(OrderState.waiting_for_location)
 async def process_location(message: types.Message, state: FSMContext):
     await state.update_data(location=message.text)
-
     keyboard = ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="📞 Telefon raqamni yuborish", request_contact=True)]],
         resize_keyboard=True,
@@ -442,14 +433,12 @@ async def process_location(message: types.Message, state: FSMContext):
     await message.answer("Telefon raqamingizni yuboring:", reply_markup=keyboard)
     await state.set_state(OrderState.waiting_for_phone)
 
-
 @dp.message(OrderState.waiting_for_phone)
 async def process_phone(message: types.Message, state: FSMContext):
     phone = message.contact.phone_number if message.contact else message.text
     await state.update_data(phone=phone)
     data = await state.get_data()
 
-    # Katalogdan OLDIN saqlash haqida so'raymiz
     await message.answer("Rahmat! ✅", reply_markup=types.ReplyKeyboardRemove())
     await message.answer(
         f"{info_text(data.get('name'), data.get('location'), phone)}\n\n"
@@ -459,7 +448,6 @@ async def process_phone(message: types.Message, state: FSMContext):
         reply_markup=save_keyboard
     )
     await state.set_state(OrderState.waiting_for_save)
-
 
 @dp.callback_query(F.data.in_({"save_yes", "save_no"}), OrderState.waiting_for_save)
 async def process_save(callback_query: types.CallbackQuery, state: FSMContext):
@@ -481,12 +469,6 @@ async def process_save(callback_query: types.CallbackQuery, state: FSMContext):
     await show_catalog(callback_query.message)
     await state.set_state(OrderState.shopping)
 
-
-@dp.message(OrderState.waiting_for_save)
-async def waiting_save_text(message: types.Message):
-    await message.answer("Iltimos, yuqoridagi «✅ Ha» yoki «❌ Yo'q» tugmasini bosing.")
-
-
 # ---------- Katalog ----------
 async def show_catalog(message: types.Message):
     for key, prod in PRODUCTS.items():
@@ -506,7 +488,6 @@ async def show_catalog(message: types.Message):
         except Exception:
             await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
 
-
 @dp.callback_query(F.data.startswith('box_'), OrderState.shopping)
 async def add_box_to_cart(callback_query: types.CallbackQuery):
     product_key = callback_query.data.split('_', 1)[1]
@@ -515,7 +496,6 @@ async def add_box_to_cart(callback_query: types.CallbackQuery):
     add_count = PRODUCTS[product_key]['count_in_box']
     user_carts[user_id][product_key] = user_carts[user_id].get(product_key, 0) + add_count
     await callback_query.answer(f"1 karobka ({add_count} ta) savatga qo'shildi! ✅")
-
 
 @dp.callback_query(F.data.startswith('dona_'), OrderState.shopping)
 async def ask_custom_dona(callback_query: types.CallbackQuery, state: FSMContext):
@@ -528,7 +508,6 @@ async def ask_custom_dona(callback_query: types.CallbackQuery, state: FSMContext
     )
     await state.set_state(OrderState.waiting_for_custom_count)
     await callback_query.answer()
-
 
 @dp.message(OrderState.waiting_for_custom_count)
 async def process_custom_dona(message: types.Message, state: FSMContext):
@@ -543,7 +522,6 @@ async def process_custom_dona(message: types.Message, state: FSMContext):
     user_carts[user_id][product_key] = user_carts[user_id].get(product_key, 0) + count
     await message.answer(f"Savatga {count} dona qo'shildi! ✅", reply_markup=main_menu_keyboard)
     await state.set_state(OrderState.shopping)
-
 
 # ---------- Savat ----------
 def build_cart(cart):
@@ -560,7 +538,6 @@ def build_cart(cart):
     text += f"\n💳 <b>Umumiy summa:</b> {total_price} so'm"
     return text, InlineKeyboardMarkup(inline_keyboard=inline_kb)
 
-
 @dp.message(F.text == "🛒 Savatni ko'rish", OrderState.shopping)
 async def show_cart(message: types.Message):
     cart = user_carts.get(message.from_user.id, {})
@@ -569,7 +546,6 @@ async def show_cart(message: types.Message):
         return
     text, kb = build_cart(cart)
     await message.answer(text, parse_mode="HTML", reply_markup=kb)
-
 
 @dp.callback_query(F.data.startswith('remove_'), OrderState.shopping)
 async def remove_from_cart(callback_query: types.CallbackQuery):
@@ -584,9 +560,6 @@ async def remove_from_cart(callback_query: types.CallbackQuery):
         else:
             text, kb = build_cart(cart)
             await callback_query.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
-    else:
-        await callback_query.answer("Bu mahsulot savatda yo'q!")
-
 
 # ---------- Buyurtmani yakunlash ----------
 @dp.message(F.text == "✅ Buyurtmani yakunlash", OrderState.shopping)
@@ -613,59 +586,119 @@ async def finish_order(message: types.Message, state: FSMContext):
         f"🛍 <b>Buyurtma tarkibi:</b>\n{order_details}\n"
         f"💳 <b>Umumiy summa:</b> {total_price} so'm"
     )
-    await bot.send_message(ADMIN_ID, admin_message, parse_mode="HTML", reply_markup=admin_order_keyboard(user_id))
+    await bot.send_message(ADMIN_ID, admin_message, parse_mode="HTML", reply_markup=admin_order_keyboard(user_id, total_price))
 
     user_carts[user_id] = {}
     await message.answer(
         "Buyurtmangiz muvaffaqiyatli yuborildi! ✅ Tez orada siz bilan bog'lanishadi.\n\n"
-        "Yangi buyurtma berish uchun /start buyrug'ini bosing (yoki pastdagi Menu tugmasi).",
+        "Yangi buyurtma berish uchun /start buyrug'ini bosing.",
         reply_markup=types.ReplyKeyboardRemove()
     )
     await send_sticker_safe(message.chat.id, "🍦", "❤", "👍", "✅")
     await state.clear()
 
-
-# Admin "Yetkazilmoqda" tugmasi (bot va Mini App buyurtmalari uchun ham ishlaydi)
-@dp.callback_query(F.data.startswith('deliv_'))
-async def process_delivery_status(callback_query: types.CallbackQuery):
+# ---------- ADMIN UCHUN TO'LOV VA QARZ MANTOQLARI ----------
+@dp.callback_query(F.data.startswith('pay_full_'))
+async def process_pay_full(callback_query: types.CallbackQuery):
     if callback_query.from_user.id != ADMIN_ID:
-        await callback_query.answer("Bu tugma faqat admin uchun!", show_alert=True)
         return
-    target_user_id = int(callback_query.data.split('_', 1)[1])
+    _, _, target_user_id, total_price = callback_query.data.split('_')
+    
+    # Mijozga qarz yozilmaydi
     try:
-        await bot.send_message(target_user_id, "Muzqaymoq 30 minutda yetib boradi 🧊")
-        await callback_query.answer("Xaridorga xabar yuborildi! ✅")
-        await callback_query.message.edit_reply_markup(
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="✅ Yetkazilmoqda (Yuborildi)", callback_data="none")],
-                [InlineKeyboardButton(text="🖨 Print qilish", callback_data="print_order")],
-            ])
-        )
+        await bot.send_message(int(target_user_id), f"Buyurtmangiz uchun to'lov qabul qilindi. Rahmat! ✅")
     except Exception:
-        await callback_query.answer("Xatolik: xaridor botni bloklagan yoki /start bosmagan bo'lishi mumkin.", show_alert=True)
+        pass
 
-
-@dp.callback_query(F.data == "none")
-async def noop(callback_query: types.CallbackQuery):
+    await callback_query.message.reply(f"To'lov to'liq qabul qilindi. Mijozga qarz yozilmadi. ✅")
     await callback_query.answer()
 
+@dp.callback_query(F.data.startswith('pay_debt_'))
+async def process_pay_debt(callback_query: types.CallbackQuery):
+    if callback_query.from_user.id != ADMIN_ID:
+        return
+    _, _, target_user_id, total_price = callback_query.data.split('_')
+    
+    order_info = parse_order_text(callback_query.message.text or "")
+    total_debt = add_user_debt(target_user_id, order_info['name'], order_info['phone'], int(total_price))
+
+    try:
+        await bot.send_message(
+            int(target_user_id), 
+            f"Buyurtmangiz qarzga rasmiylashtirildi.\n"
+            f"Ushbu buyurtma: {total_price} so'm.\n"
+            f"Umumiy qarzingiz: {total_debt} so'm."
+        )
+    except Exception:
+        pass
+
+    await callback_query.message.reply(f"Mijoz qarziga {total_price} so'm qo'shildi. Umumiy qarzi: {total_debt} so'm.")
+    await callback_query.answer()
+
+@dp.callback_query(F.data.startswith('pay_part_'))
+async def process_pay_part(callback_query: types.CallbackQuery, state: FSMContext):
+    if callback_query.from_user.id != ADMIN_ID:
+        return
+    _, _, target_user_id, total_price = callback_query.data.split('_')
+    
+    await state.update_data(target_user_id=target_user_id, total_price=int(total_price), msg=callback_query.message)
+    await callback_query.message.reply("Olingan summani kiriting (masalan 20000):")
+    await state.set_state(OrderState.waiting_for_partial_pay)
+    await callback_query.answer()
+
+@dp.message(OrderState.waiting_for_partial_pay)
+async def process_partial_pay_input(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    if not message.text or not message.text.isdigit():
+        await message.answer("Iltimos, faqat raqam kiriting:")
+        return
+
+    paid = int(message.text)
+    data = await state.get_data()
+    target_user_id = data['target_user_id']
+    total_price = data['total_price']
+    
+    debt_to_add = total_price - paid
+    order_info = parse_order_text(data['msg'].text or "")
+    
+    if debt_to_add > 0:
+        total_debt = add_user_debt(target_user_id, order_info['name'], order_info['phone'], debt_to_add)
+        msg_text = f"Qolgan {debt_to_add} so'm qarzga yozildi. Umumiy qarzi: {total_debt} so'm."
+        try:
+            await bot.send_message(
+                int(target_user_id), 
+                f"Siz {paid} so'm to'ladingiz.\n"
+                f"Qolgan {debt_to_add} so'm qarzga yozildi.\n"
+                f"Umumiy qarzingiz: {total_debt} so'm."
+            )
+        except Exception:
+            pass
+    else:
+        msg_text = "To'lov to'liq qoplandi, qarz yozilmadi."
+
+    await message.answer(msg_text)
+    await state.clear()
+
+# ---------- Mobil Ilova uchun API (Qarzdorlarni ilovaga berish) ----------
+async def get_debts_api(request):
+    return web.json_response(debts_db)
 
 # ---------- Render uchun HTTP sahifa ----------
 async def handle_ping(request):
-    return web.Response(text="Bot ishlamoqda!")
-
+    return web.Response(text="Bot va API ishlamoqda!")
 
 async def setup_bot_menu():
-    # Telefonda 3 chiziq / kompyuterda "Menu" tugmasi -> /start chiqadi
     await bot.set_my_commands([
         BotCommand(command="start", description="🍦 Buyurtma berishni boshlash"),
     ])
     await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
 
-
 async def main():
     app = web.Application()
     app.router.add_get("/", handle_ping)
+    app.router.add_get("/api/debts", get_debts_api) # Mobil ilova uchun API endpoints
+    
     port = int(os.environ.get("PORT", 8080))
     runner = web.AppRunner(app)
     await runner.setup()
@@ -674,7 +707,6 @@ async def main():
 
     await setup_bot_menu()
     await dp.start_polling(bot)
-
 
 if __name__ == '__main__':
     asyncio.run(main())
