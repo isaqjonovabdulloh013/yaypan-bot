@@ -24,15 +24,17 @@ TOKEN = os.environ.get("BOT_TOKEN", "8941827736:AAE_9frRYe2r2FKhwcL9QK8eoOcXtmCf
 ADMIN_ID = 8488328091
 WEBAPP_URL = "https://yaypanmuzqamoq.netlify.app"
 USERS_FILE = "users.json"
-DEBTS_FILE = "debts.json"  # Qarzlar bazasi
-ORDERS_FILE = "orders.json" # Buyurtmalar bazasi
+DEBTS_FILE = "debts.json"    # База долгов
+ORDERS_FILE = "orders.json"  # База заказов
+CHANNEL = "@YAYPAN_muzqaymoq"
+CHANNEL_URL = "https://t.me/YAYPAN_muzqaymoq"
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# Mahsulotlar ro'yxati
+# Список продуктов
 PRODUCTS = {
     "oilaviy": {"name": "1. Oilaviy (0.5 kg karobka)", "count_in_box": 12, "price": 15000, "photo": "https://t.me/YAYPAN_muzqaymoq/21?single"},
     "zuxro_shoko": {"name": "2. Zuxro shokolad", "count_in_box": 24, "price": 4000, "photo": "https://t.me/YAYPAN_muzqaymoq/19"},
@@ -68,20 +70,20 @@ class OrderState(StatesGroup):
 
 user_carts = {}
 
-# ---------- Saqlangan fayllar operatsiyalari ----------
+# ---------- Операции с JSON-файлами ----------
 def load_json(filepath):
     try:
         with open(filepath, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
-        return {} if not filepath.endswith("list.json") else []
+        return [] if filepath.endswith("orders.json") else {}
 
 def save_json(filepath, data):
     try:
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        logging.error(f"{filepath} yozishda xato: {e}")
+        logging.error(f"Ошибка записи в {filepath}: {e}")
 
 saved_users = load_json(USERS_FILE)
 debts_db = load_json(DEBTS_FILE)
@@ -103,7 +105,6 @@ def delete_saved_user(user_id):
 
 def add_user_debt(user_id, name, phone, added_amount):
     uid = str(user_id)
-    # Agar foydalanuvchi ma'lumotlari bo'sh kelsa, baza orqali tekshirish
     if (not name or name == "-") and uid in saved_users:
         name = saved_users[uid].get("name", "Noma'lum")
     if (not phone or phone == "-") and uid in saved_users:
@@ -121,12 +122,12 @@ def add_user_debt(user_id, name, phone, added_amount):
     save_json(DEBTS_FILE, debts_db)
     return debts_db[uid]["debt"]
 
-# ---------- Klaviaturalar ----------
+# ---------- Клавиатуры ----------
 main_menu_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🛒 Savatni ko'rish"), KeyboardButton(text="✅ Buyurtmani yakunlash")],
         [KeyboardButton(text="🍦 Mini App", web_app=WebAppInfo(url=WEBAPP_URL)),
-         KeyboardButton(text="✏️️ Ma'lumotlarni o'zgartirish")],
+         KeyboardButton(text="✏️ Ma'lumotlarni o'zgartirish")],
     ],
     resize_keyboard=True
 )
@@ -174,11 +175,211 @@ def parse_order_text(text):
         "total": int(re.sub(r"\s", "", total_match.group(1))) if total_match and total_match.group(1).strip() else sum(i[3] for i in items),
     }
 
-# ---------- /start va oqimlar ----------
+# ---------- Генерация чеков ----------
+def _load_font(size, bold=False):
+    names = (
+        ["DejaVuSans-Bold.ttf", "LiberationSans-Bold.ttf", "arialbd.ttf"] if bold
+        else ["DejaVuSans.ttf", "LiberationSans-Regular.ttf", "arial.ttf"]
+    )
+    dirs = ["", "/usr/share/fonts/truetype/dejavu/", "/usr/share/fonts/dejavu/",
+            "/usr/share/fonts/truetype/liberation/", "/usr/share/fonts/liberation/",
+            "C:/Windows/Fonts/"]
+    for d in dirs:
+        for n in names:
+            try:
+                return ImageFont.truetype(d + n, size)
+            except Exception:
+                pass
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        return ImageFont.load_default()
+
+def build_receipt_image(order):
+    W, M = 800, 40
+    f_title, f_b, f_n, f_s = _load_font(44, True), _load_font(30, True), _load_font(28), _load_font(24)
+    x_qty, x_price, x_sum = 420, 580, W - M
+
+    rows = order["items"]
+    H = 330 + len(rows) * 52 + 140
+    img = Image.new("RGB", (W, H), "white")
+    d = ImageDraw.Draw(img)
+
+    def center(text, y, font):
+        w = d.textlength(text, font=font)
+        d.text(((W - w) / 2, y), text, font=font, fill="black")
+
+    def right(text, xr, y, font):
+        w = d.textlength(text, font=font)
+        d.text((xr - w, y), text, font=font, fill="black")
+
+    def fit(text, font, maxw):
+        while d.textlength(text, font=font) > maxw and len(text) > 1:
+            text = text[:-2] + "…"
+        return text
+
+    y = 25
+    center("YAYPAN MUZQAYMOQ", y, f_title); y += 62
+    center(datetime.now().strftime("%d.%m.%Y %H:%M"), y, f_s); y += 50
+    d.text((M, y), "Ism:", font=f_b, fill="black")
+    d.text((M + 90, y), fit(order["name"], f_n, W - 2 * M - 90), font=f_n, fill="black"); y += 46
+    d.text((M, y), "Telefon:", font=f_b, fill="black")
+    d.text((M + 150, y), fit(order["phone"], f_n, W - 2 * M - 150), font=f_n, fill="black"); y += 60
+
+    d.line((M, y, W - M, y), fill="black", width=3); y += 10
+    d.text((M, y), "Mahsulot", font=f_b, fill="black")
+    right("Soni", x_qty, y, f_b)
+    right("Narxi", x_price, y, f_b)
+    right("Summa", x_sum, y, f_b); y += 48
+    d.line((M, y, W - M, y), fill="black", width=3); y += 10
+
+    for title, qty, price, cost in rows:
+        d.text((M, y), fit(title, f_n, 285), font=f_n, fill="black")
+        right(str(qty), x_qty, y, f_n)
+        right(fmt_money(price), x_price, y, f_n)
+        right(fmt_money(cost), x_sum, y, f_n)
+        y += 46
+        d.line((M, y, W - M, y), fill="gray", width=1); y += 6
+
+    y += 14
+    d.line((M, y, W - M, y), fill="black", width=3); y += 16
+    d.text((M, y), "JAMI:", font=f_title, fill="black")
+    right(f"{fmt_money(order['total'])} so'm", W - M, y, f_title)
+
+    buf = io.BytesIO()
+    img.crop((0, 0, W, y + 80)).save(buf, format="PNG")
+    return buf.getvalue()
+
+@dp.callback_query(F.data == "print_order")
+async def print_order(callback_query: types.CallbackQuery):
+    if callback_query.from_user.id != ADMIN_ID:
+        await callback_query.answer("Bu tugma faqat admin uchun!", show_alert=True)
+        return
+    order = parse_order_text(callback_query.message.text or callback_query.message.caption or "")
+    if not order["items"]:
+        await callback_query.answer("Buyurtma tarkibini o'qib bo'lmadi.", show_alert=True)
+        return
+    png = build_receipt_image(order)
+    await callback_query.message.answer_photo(BufferedInputFile(png, filename="chek.png"))
+    await callback_query.answer("Chek yuborildi ✅")
+
+# ---------- Обязательная подписка ----------
+verified_users = set()
+_admin_warned = False
+
+async def is_subscribed(user_id):
+    global _admin_warned
+    try:
+        m = await bot.get_chat_member(CHANNEL, user_id)
+        return m.status in ("member", "administrator", "creator") or (
+            m.status == "restricted" and getattr(m, "is_member", False)
+        )
+    except Exception as e:
+        logging.warning(f"Obunani tekshirib bo'lmadi: {e}")
+        if not _admin_warned:
+            _admin_warned = True
+            try:
+                await bot.send_message(
+                    ADMIN_ID,
+                    f"⚠️ Obunani tekshirib bo'lmadi. Botni {CHANNEL} kanaliga ADMIN qilib qo'shing.\nXato: {e}"
+                )
+            except Exception:
+                pass
+        return True
+
+def subscribe_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📢 Kanalga obuna bo'lish", url=CHANNEL_URL)],
+        [InlineKeyboardButton(text="✅ Obuna bo'ldim", callback_data="check_sub")],
+    ])
+
+async def send_subscribe_prompt(message: types.Message):
+    await send_sticker_safe(message.chat.id, "📢", "👋", "🙏")
+    await message.answer(
+        "Assalomu alaykum! 🍦\n\n"
+        f"Botdan foydalanish uchun avval rasmiy kanalimizga obuna bo'ling:\n👉 {CHANNEL}\n\n"
+        "Obuna bo'lgach, «✅ Obuna bo'ldim» tugmasini bosing.",
+        reply_markup=subscribe_keyboard()
+    )
+
+class SubscriptionMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        user = data.get("event_from_user")
+        if user is None or user.id == ADMIN_ID or user.id in verified_users:
+            return await handler(event, data)
+        if isinstance(event, types.Message) and (event.text or "").startswith("/start"):
+            return await handler(event, data)
+        if isinstance(event, types.CallbackQuery) and event.data == "check_sub":
+            return await handler(event, data)
+        if await is_subscribed(user.id):
+            verified_users.add(user.id)
+            return await handler(event, data)
+        if isinstance(event, types.CallbackQuery):
+            await event.answer("Avval kanalga obuna bo'ling!", show_alert=True)
+            if event.message:
+                await send_subscribe_prompt(event.message)
+        elif isinstance(event, types.Message):
+            await send_subscribe_prompt(event)
+        return
+
+dp.message.middleware(SubscriptionMiddleware())
+dp.callback_query.middleware(SubscriptionMiddleware())
+
+@dp.callback_query(F.data == "check_sub")
+async def check_sub(callback_query: types.CallbackQuery, state: FSMContext):
+    user_id = callback_query.from_user.id
+    if not await is_subscribed(user_id):
+        await callback_query.answer("❌ Siz hali obuna bo'lmagansiz. Avval kanalga obuna bo'ling.", show_alert=True)
+        return
+    verified_users.add(user_id)
+    await callback_query.answer("✅ Obuna tasdiqlandi!")
+    try:
+        await callback_query.message.delete()
+    except Exception:
+        pass
+    await send_sticker_safe(callback_query.message.chat.id, "🎉", "🥳", "👏")
+    await begin_flow(callback_query.message, state, user_id)
+
+# ---------- Анимационные стикеры ----------
+STICKER_SETS = ["AnimatedEmojies", "animatedemoji", "HotCherry", "TheFoods", "BananaFun"]
+_sticker_cache = {}
+
+def _norm(e):
+    return (e or "").replace("\ufe0f", "")
+
+async def pick_sticker(*emojis):
+    for set_name in STICKER_SETS:
+        if set_name not in _sticker_cache:
+            try:
+                st = await bot.get_sticker_set(set_name)
+                _sticker_cache[set_name] = [(_norm(x.emoji), x.file_id) for x in st.stickers]
+            except Exception:
+                _sticker_cache[set_name] = []
+        for e in emojis:
+            for emo, fid in _sticker_cache[set_name]:
+                if emo == _norm(e):
+                    return fid
+    return None
+
+async def send_sticker_safe(chat_id, *emojis):
+    try:
+        fid = await pick_sticker(*emojis)
+        if fid:
+            await bot.send_sticker(chat_id, fid)
+    except Exception as e:
+        logging.info(f"Stiker yuborilmadi: {e}")
+
+# ---------- /start и сценарий ----------
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     await state.clear()
+    if user_id != ADMIN_ID and user_id not in verified_users:
+        if not await is_subscribed(user_id):
+            await message.answer("👋", reply_markup=types.ReplyKeyboardRemove())
+            await send_subscribe_prompt(message)
+            return
+        verified_users.add(user_id)
     await begin_flow(message, state, user_id)
 
 async def begin_flow(message: types.Message, state: FSMContext, user_id: int):
@@ -218,7 +419,7 @@ async def change_info(message: types.Message, state: FSMContext):
 @dp.message(OrderState.waiting_for_name)
 async def process_name(message: types.Message, state: FSMContext):
     await state.update_data(name=message.text)
-    await message.answer("Endi manzilingizni yozib yuboring:")
+    await message.answer("Endi manzilingizni (qaysi joyda ekaningizni) yozib yuboring:")
     await state.set_state(OrderState.waiting_for_location)
 
 @dp.message(OrderState.waiting_for_location)
@@ -241,7 +442,8 @@ async def process_phone(message: types.Message, state: FSMContext):
     await message.answer("Rahmat! ✅", reply_markup=types.ReplyKeyboardRemove())
     await message.answer(
         f"{info_text(data.get('name'), data.get('location'), phone)}\n\n"
-        f"💾 Shu ma'lumotlar saqlansinmi?",
+        f"💾 Shu ma'lumotlar saqlansinmi?\n"
+        f"Saqlansa, keyingi safar qayta so'ralmaydi va buyurtmalar doim shu nomdan boradi.",
         parse_mode="HTML",
         reply_markup=save_keyboard
     )
@@ -254,16 +456,20 @@ async def process_save(callback_query: types.CallbackQuery, state: FSMContext):
 
     if callback_query.data == "save_yes":
         set_saved_user(user_id, data.get("name"), data.get("location"), data.get("phone"))
+        result = "💾 Ma'lumotlaringiz saqlandi!"
+    else:
+        result = "Ma'lumotlar saqlanmadi (faqat shu buyurtma uchun ishlatiladi)."
 
     await callback_query.message.edit_reply_markup(reply_markup=None)
     await callback_query.answer()
     await callback_query.message.answer(
-        "Quyidagi mahsulotlar ro'yxatidan tanlang:",
+        f"{result}\n\nQuyidagi mahsulotlar ro'yxatidan tanlang:",
         reply_markup=main_menu_keyboard
     )
     await show_catalog(callback_query.message)
     await state.set_state(OrderState.shopping)
 
+# ---------- Каталог ----------
 async def show_catalog(message: types.Message):
     for key, prod in PRODUCTS.items():
         box_total = prod['count_in_box'] * prod['price']
@@ -297,7 +503,7 @@ async def ask_custom_dona(callback_query: types.CallbackQuery, state: FSMContext
     prod = PRODUCTS[product_key]
     await state.update_data(selected_product=product_key)
     await callback_query.message.answer(
-        f"<b>{prod['name']}</b> uchun nechta dona olishni xohlaysiz? Raqamni kiriting:",
+        f"<b>{prod['name']}</b> uchun nechta dona olishni xohlaysiz? Raqamni kiriting (masalan: 70):",
         parse_mode="HTML"
     )
     await state.set_state(OrderState.waiting_for_custom_count)
@@ -306,7 +512,7 @@ async def ask_custom_dona(callback_query: types.CallbackQuery, state: FSMContext
 @dp.message(OrderState.waiting_for_custom_count)
 async def process_custom_dona(message: types.Message, state: FSMContext):
     if not message.text or not message.text.isdigit() or int(message.text) <= 0:
-        await message.answer("Iltimos, faqat raqam kiriting:")
+        await message.answer("Iltimos, faqat raqam kiriting (masalan: 50):")
         return
     count = int(message.text)
     data = await state.get_data()
@@ -317,6 +523,45 @@ async def process_custom_dona(message: types.Message, state: FSMContext):
     await message.answer(f"Savatga {count} dona qo'shildi! ✅", reply_markup=main_menu_keyboard)
     await state.set_state(OrderState.shopping)
 
+# ---------- Корзина ----------
+def build_cart(cart):
+    text = "🛒 <b>Sizning savatingiz:</b>\n\n"
+    total_price = 0
+    inline_kb = []
+    for prod_key, total_items in cart.items():
+        if prod_key in PRODUCTS:
+            prod = PRODUCTS[prod_key]
+            cost = total_items * prod['price']
+            total_price += cost
+            text += f"• {prod['name']}: {total_items} ta dona - {cost} so'm\n"
+            inline_kb.append([InlineKeyboardButton(text=f"❌ O'chirish: {prod['name']}", callback_data=f"remove_{prod_key}")])
+    text += f"\n💳 <b>Umumiy summa:</b> {total_price} so'm"
+    return text, InlineKeyboardMarkup(inline_keyboard=inline_kb)
+
+@dp.message(F.text == "🛒 Savatni ko'rish", OrderState.shopping)
+async def show_cart(message: types.Message):
+    cart = user_carts.get(message.from_user.id, {})
+    if not cart:
+        await message.answer("Savatingiz hozircha bo'sh. 📭", reply_markup=main_menu_keyboard)
+        return
+    text, kb = build_cart(cart)
+    await message.answer(text, parse_mode="HTML", reply_markup=kb)
+
+@dp.callback_query(F.data.startswith('remove_'), OrderState.shopping)
+async def remove_from_cart(callback_query: types.CallbackQuery):
+    product_key = callback_query.data.split('_', 1)[1]
+    user_id = callback_query.from_user.id
+    if user_id in user_carts and product_key in user_carts[user_id]:
+        del user_carts[user_id][product_key]
+        await callback_query.answer("Savatdan olib tashlandi! 🗑")
+        cart = user_carts[user_id]
+        if not cart:
+            await callback_query.message.edit_text("Savatingiz bo'shadi. 📭")
+        else:
+            text, kb = build_cart(cart)
+            await callback_query.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+
+# ---------- Завершение заказа ----------
 @dp.message(F.text == "✅ Buyurtmani yakunlash", OrderState.shopping)
 async def finish_order(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
@@ -329,7 +574,7 @@ async def finish_order(message: types.Message, state: FSMContext):
     total_price = 0
     order_details = ""
     items_summary = []
-    
+
     for prod_key, total_items in cart.items():
         if prod_key in PRODUCTS:
             prod = PRODUCTS[prod_key]
@@ -338,10 +583,11 @@ async def finish_order(message: types.Message, state: FSMContext):
             order_details += f"• {prod['name']}: {total_items} ta × {prod['price']} = {cost} so'm\n"
             items_summary.append(f"{prod['name']} ({total_items}ta)")
 
-    user_name = data.get('name') or (saved_users.get(str(user_id)), {}).get('name', 'Noma'lum')
-    user_phone = data.get('phone') or (saved_users.get(str(user_id)), {}).get('phone', '-')
+    user_saved_info = saved_users.get(str(user_id)) or {}
+    user_name = data.get('name') or user_saved_info.get('name') or "Noma'lum"
+    user_phone = data.get('phone') or user_saved_info.get('phone') or "-"
 
-    # Yangi buyurtmani xotiraga saqlash
+    # Сохранение заказа для API
     new_order = {
         "id": len(orders_db) + 1,
         "clientName": user_name,
@@ -363,22 +609,26 @@ async def finish_order(message: types.Message, state: FSMContext):
 
     user_carts[user_id] = {}
     await message.answer(
-        "Buyurtmangiz muvaffaqiyatli yuborildi! ✅\n\nYangi buyurtma uchun /start bosing.",
+        "Buyurtmangiz muvaffaqiyatli yuborildi! ✅ Tez orada siz bilan bog'lanishadi.\n\n"
+        "Yangi buyurtma berish uchun /start buyrug'ini bosing.",
         reply_markup=types.ReplyKeyboardRemove()
     )
+    await send_sticker_safe(message.chat.id, "🍦", "❤", "👍", "✅")
     await state.clear()
 
-# ---------- Admin qarz to'lovlari ----------
+# ---------- Оплата и долги (Админ) ----------
 @dp.callback_query(F.data.startswith('pay_full_'))
 async def process_pay_full(callback_query: types.CallbackQuery):
     if callback_query.from_user.id != ADMIN_ID:
         return
-    _, _, target_user_id, _ = callback_query.data.split('_')
+    _, _, target_user_id, total_price = callback_query.data.split('_')
+    
     try:
         await bot.send_message(int(target_user_id), f"Buyurtmangiz uchun to'lov qabul qilindi. Rahmat! ✅")
     except Exception:
         pass
-    await callback_query.message.reply(f"To'lov to'liq qabul qilindi. ✅")
+
+    await callback_query.message.reply(f"To'lov to'liq qabul qilindi. Mijozga qarz yozilmadi. ✅")
     await callback_query.answer()
 
 @dp.callback_query(F.data.startswith('pay_debt_'))
@@ -386,10 +636,10 @@ async def process_pay_debt(callback_query: types.CallbackQuery):
     if callback_query.from_user.id != ADMIN_ID:
         return
     _, _, target_user_id, total_price = callback_query.data.split('_')
-    order_info = parse_order_text(callback_query.message.text or "")
     
+    order_info = parse_order_text(callback_query.message.text or callback_query.message.caption or "")
     total_debt = add_user_debt(target_user_id, order_info['name'], order_info['phone'], int(total_price))
-    
+
     try:
         await bot.send_message(
             int(target_user_id), 
@@ -408,14 +658,21 @@ async def process_pay_part(callback_query: types.CallbackQuery, state: FSMContex
     if callback_query.from_user.id != ADMIN_ID:
         return
     _, _, target_user_id, total_price = callback_query.data.split('_')
-    await state.update_data(target_user_id=target_user_id, total_price=int(total_price), msg_text=callback_query.message.text)
+    
+    await state.update_data(
+        target_user_id=target_user_id, 
+        total_price=int(total_price), 
+        msg_text=callback_query.message.text or callback_query.message.caption or ""
+    )
     await callback_query.message.reply("Olingan summani kiriting (masalan 20000):")
     await state.set_state(OrderState.waiting_for_partial_pay)
     await callback_query.answer()
 
 @dp.message(OrderState.waiting_for_partial_pay)
 async def process_partial_pay_input(message: types.Message, state: FSMContext):
-    if message.from_user.id != ADMIN_ID or not message.text or not message.text.isdigit():
+    if message.from_user.id != ADMIN_ID:
+        return
+    if not message.text or not message.text.isdigit():
         await message.answer("Iltimos, faqat raqam kiriting:")
         return
 
@@ -430,13 +687,22 @@ async def process_partial_pay_input(message: types.Message, state: FSMContext):
     if debt_to_add > 0:
         total_debt = add_user_debt(target_user_id, order_info['name'], order_info['phone'], debt_to_add)
         msg_text = f"Qolgan {debt_to_add} so'm qarzga yozildi. Umumiy qarzi: {total_debt} so'm."
+        try:
+            await bot.send_message(
+                int(target_user_id), 
+                f"Siz {paid} so'm to'ladingiz.\n"
+                f"Qolgan {debt_to_add} so'm qarzga yozildi.\n"
+                f"Umumiy qarzingiz: {total_debt} so'm."
+            )
+        except Exception:
+            pass
     else:
         msg_text = "To'lov to'liq qoplandi, qarz yozilmadi."
 
     await message.answer(msg_text)
     await state.clear()
 
-# ---------- API endpoints (Mobil ilova uchun) ----------
+# ---------- API (Для мобильного приложения) ----------
 async def get_orders_api(request):
     return web.json_response(orders_db)
 
@@ -455,12 +721,12 @@ async def setup_bot_menu():
 async def main():
     app = web.Application()
     
-    # HTTP marshrutlari
+    # Маршруты HTTP
     app.router.add_get("/", handle_ping)
     app.router.add_get("/api/orders", get_orders_api)
     app.router.add_get("/api/debts", get_debts_api)
 
-    # CORS sozlashi (Mobil ilova va Brauzerlar uchun)
+    # Настройка CORS
     cors = aiohttp_cors.setup(app, defaults={
         "*": aiohttp_cors.ResourceOptions(
             allow_credentials=True,
